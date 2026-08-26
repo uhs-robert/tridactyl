@@ -23,23 +23,20 @@ function splitAtPrefix(keyStr: string, n: number): [string, string] {
     return [pressed, remaining]
 }
 
-const excmdsFile = Metadata.everything.getFile("src/excmds.ts")
-
-function argAcceptsNumber(a: any): boolean {
-    if (a.kind === "number") return true
-    if (a.kind === "union" && Array.isArray(a.types))
-        return a.types.some((t: any) => t.kind === "number")
+function argAcceptsNumber(t: any): boolean {
+    if (!t) return false
+    if (t.type === "intrinsic" && t.name === "number") return true
+    if (t.type === "union" && Array.isArray(t.types))
+        return t.types.some((u: any) => argAcceptsNumber(u))
     return false
 }
 
 function commandAcceptsCount(exstr: string): boolean {
     const cmdWord = exstr.trim().split(/\s+/)[0]
     if (!cmdWord) return false
-    const sym = excmdsFile?.getFunction(cmdWord)
-    if (!sym) return false
-    const ft = sym.type as any
-    if (ft.kind !== "function" || !Array.isArray(ft.args)) return false
-    return ft.args.some((a: any) => argAcceptsNumber(a))
+    const fn = Metadata.excmdsFunctions[cmdWord]
+    if (!fn) return false
+    return fn.params.some((p: any) => argAcceptsNumber(p.type))
 }
 
 function buildColumn(
@@ -73,7 +70,7 @@ function buildColumn(
         exstrEl.textContent = exstr
         const cmdWord = exstr.trim().split(/\s+/)[0]
         if (cmdWord) {
-            const doc = excmdsFile?.getFunction(cmdWord)?.doc
+            const doc = Metadata.getDoc(Metadata.excmdsFunctions[cmdWord])
             if (doc) exstrEl.title = doc
             exstrEl.href =
                 browser.runtime.getURL(

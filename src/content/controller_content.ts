@@ -1,4 +1,4 @@
-import { isTextEditable } from "@src/lib/dom"
+import { isTextEditable, activeElement } from "@src/lib/dom"
 import { contentState, ModeName } from "@src/content/state_content"
 import Logger from "@src/lib/logging"
 import * as controller from "@src/lib/controller"
@@ -8,8 +8,10 @@ import {
     minimalKeyFromKeyboardEvent,
     MinimalKey,
     hasModifiers,
+    formatKeysForModeIndicator,
+    isTrustedKeyboardEvent,
+    TrustedKeyboardEvent,
 } from "@src/lib/keyseq"
-import { deepestShadowRoot } from "@src/lib/dom"
 
 import * as hinting from "@src/content/hinting"
 import * as gobblemode from "@src/parsers/gobblemode"
@@ -18,8 +20,21 @@ import * as nmode from "@src/parsers/nmode"
 import * as Messaging from "@src/lib/messaging"
 import * as config from "@src/lib/config"
 import * as WhichKeyContent from "@src/content/whichkey_content"
+import { mode2maps } from "@src/lib/binding"
 
 const logger = new Logger("controller")
+
+function mapstrsForMode(mode: string) {
+    const maps = config.getDynamic(mode2maps.get(mode) || mode + "maps")
+    return Object.keys(maps || {})
+}
+
+function isCountAware() {
+    return (
+        config.get("modesubconfigs", contentState.mode, "countaware") ??
+        config.get("countaware")
+    ) === "true"
+}
 
 /**
  * KeyCanceller: keep track of keys that have been cancelled in the keydown
@@ -32,32 +47,48 @@ const logger = new Logger("controller")
  * A, then B, releases B and then A).
  */
 class KeyCanceller {
-    private keyPress: KeyboardEvent[] = []
-    private keyUp: KeyboardEvent[] = []
+    private keyPress: TrustedKeyboardEvent[] = []
+    private keyUp: TrustedKeyboardEvent[] = []
 
     constructor() {
         this.cancelKeyUp = this.cancelKeyUp.bind(this)
         this.cancelKeyPress = this.cancelKeyPress.bind(this)
     }
 
-    push(ke: KeyboardEvent) {
+    push(ke: TrustedKeyboardEvent) {
         ke.preventDefault()
         ke.stopImmediatePropagation()
-        this.keyPress.push(ke)
-        this.keyUp.push(ke)
+
+        if (ke.type === "keydown") {
+            this.keyPress.push(ke)
+            this.keyUp.push(ke)
+        } else if (ke.type === "keyup") {
+            // only need to bookkeep, the keyup will be cancelled by the keydown
+            this.removeKeys(ke, this.keyUp)
+            this.removeKeys(ke, this.keyPress)
+        }
     }
 
-    public cancelKeyPress = (ke: KeyboardEvent) => {
-        if (!ke.isTrusted) return
+    public cancelKeyPress = (ke: TrustedKeyboardEvent) => {
         this.cancelKey(ke, this.keyPress)
     }
 
-    public cancelKeyUp = (ke: KeyboardEvent) => {
-        if (!ke.isTrusted) return
+    public cancelKeyUp = (ke: TrustedKeyboardEvent) => {
         this.cancelKey(ke, this.keyUp)
+        this.removeKeys(ke, this.keyUp)
+        this.removeKeys(ke, this.keyPress)
     }
 
-    private cancelKey(ke: KeyboardEvent, kes: KeyboardEvent[]) {
+    private removeKeys(ke: TrustedKeyboardEvent, kes: TrustedKeyboardEvent[]) {
+        while (this.removeKey(ke, kes)) {
+            // Repeat keydowns can add duplicate cancellations.
+        }
+    }
+
+    private removeKey(
+        ke: TrustedKeyboardEvent,
+        kes: TrustedKeyboardEvent[],
+    ) {
         const index = kes.findIndex(
             ke2 =>
                 ke.altKey === ke2.altKey &&
@@ -66,12 +97,20 @@ class KeyCanceller {
                 ke.ctrlKey === ke2.ctrlKey &&
                 ke.metaKey === ke2.metaKey &&
                 ke.shiftKey === ke2.shiftKey &&
-                ke.target === ke2.target,
+                (ke.type === "keyup" || ke.target === ke2.target),
         )
-        if (index >= 0 && ke instanceof KeyboardEvent) {
+        if (index < 0) return false
+        kes.splice(index, 1)
+        return true
+    }
+
+    private cancelKey(
+        ke: TrustedKeyboardEvent,
+        kes: TrustedKeyboardEvent[],
+    ) {
+        if (this.removeKey(ke, kes)) {
             ke.preventDefault()
             ke.stopImmediatePropagation()
-            kes.splice(index, 1)
         }
     }
 }
@@ -117,18 +156,21 @@ Messaging.addListener(
     },
 )
 
+let keysToFeed: KeyEventLike[] = []
+let generatorIsWaiting = true
+
 /** Accepts keyevents, resolves them to maps, maps to exstrs, executes exstrs */
 function* ParserController() {
     const parsers: {
         [mode_name in ModeName]: (keys: MinimalKey[]) => ParserResponse
     } = {
-        normal: keys => generic.parser("nmaps", keys),
-        insert: keys => generic.parser("imaps", keys),
-        input: keys => generic.parser("inputmaps", keys),
-        ignore: keys => generic.parser("ignoremaps", keys),
+        normal: keys => generic.parser("nmaps", keys, isCountAware()),
+        insert: keys => generic.parser("imaps", keys, isCountAware()),
+        input: keys => generic.parser("inputmaps", keys, isCountAware()),
+        ignore: keys => generic.parser("ignoremaps", keys, isCountAware()),
         hint: hinting.parser,
         gobble: gobblemode.parser,
-        visual: keys => generic.parser("vmaps", keys),
+        visual: keys => generic.parser("vmaps", keys, isCountAware()),
         nmode: nmode.parser,
     }
 
@@ -138,19 +180,35 @@ function* ParserController() {
         let keyEvents: MinimalKey[] = []
         try {
             while (true) {
-                const keyevent: KeyEventLike = yield
-                let shadowRoot = null
+                generatorIsWaiting = true
+                const keyevent: KeyEventLike = keysToFeed.length
+                    ? keysToFeed.shift()
+                    : yield
+                generatorIsWaiting = false
+
+                if (
+                    !(keyevent instanceof MinimalKey) &&
+                    !isTrustedKeyboardEvent(keyevent)
+                ) {
+                    logger.warning("Skipped spoofed key event", keyevent)
+                    continue
+                }
+
+                // Don't break old modes with keyup events
+                // TODO: fix this in these parsers directly
+                if (
+                    ["hint", "gobble"].includes(contentState.mode) &&
+                    (!(keyevent instanceof MinimalKey)
+                        ? keyevent.type === "keyup"
+                        : keyevent.keyup)
+                )
+                    continue
                 let textEditable = false
 
-                if (keyevent instanceof KeyboardEvent) {
-                    shadowRoot = deepestShadowRoot(
-                        (keyevent.target as Element).shadowRoot,
-                    )
+                if (!(keyevent instanceof MinimalKey)) {
+                    const deepTarget = activeElement(keyevent.target as HTMLElement) || keyevent.target as HTMLElement
+                    textEditable = isTextEditable(deepTarget)
 
-                    textEditable =
-                        shadowRoot === null
-                            ? isTextEditable(keyevent.target as Element)
-                            : isTextEditable(shadowRoot.activeElement)
                     // Accumulate key events. The parser will cut this
                     // down whenever it's not a valid prefix of a known
                     // binding, so it can't grow indefinitely unless you
@@ -169,6 +227,7 @@ function* ParserController() {
                 // to date (March 2018).
                 // https://github.com/tridactyl/tridactyl/issues/311
                 if (
+                    currentMode !== "nmode" &&
                     currentMode !== "ignore" &&
                     currentMode !== "hint" &&
                     currentMode !== "input"
@@ -192,7 +251,7 @@ function* ParserController() {
 
                 const response = (
                     parsers[contentState.mode] ||
-                    (keys => generic.parser(contentState.mode + "maps", keys))
+                    (keys => generic.parser(contentState.mode + "maps", keys, isCountAware()))
                 )(keyEvents)
                 logger.debug(
                     currentMode,
@@ -201,27 +260,20 @@ function* ParserController() {
                     response,
                 )
 
-                if (response.isMatch && keyevent instanceof KeyboardEvent) {
+                if (response.isMatch && !(keyevent instanceof MinimalKey)) {
                     canceller.push(keyevent)
                 }
 
                 if (response.exstr) {
                     exstr = response.exstr
-                    if (
-                        exstr.startsWith("fillcmdline") &&
-                        !exstr.startsWith("fillcmdline_tmp") &&
-                        !exstr.startsWith("fillcmdline_nofocus")
-                    ) {
-                        logger.debug("Starting buffering of page keys")
-                        bufferingPageKeysBeginTime = performance.now()
-                        mustBufferPageKeysForClInput = true
-                        bufferedPageKeys = []
-                    }
                     break
                 } else {
                     keyEvents = response.keys
                     // show current keyEvents as a suffix of the contentState
-                    const suffix = keyEvents.map(x => x.toMapstr()).join("")
+                    const suffix = formatKeysForModeIndicator(
+                        keyEvents,
+                        mapstrsForMode(contentState.mode),
+                    )
                     if (previousSuffix !== suffix) {
                         contentState.suffix = suffix
                         previousSuffix = suffix
@@ -245,7 +297,7 @@ function* ParserController() {
             }
             contentState.suffix = ""
             WhichKeyContent.hide()
-            controller.acceptExCmd(exstr)
+            controller.acceptExCmd(exstr, "content")
         } catch (e) {
             // Rumsfeldian errors are caught here
             logger.error("An error occurred in the content controller: ", e)
@@ -256,10 +308,47 @@ function* ParserController() {
 export const generator = ParserController() // var rather than let stops weirdness in repl.
 generator.next()
 
+export function startBufferingPageKeys() {
+    logger.debug("Starting buffering of page keys")
+    bufferingPageKeysBeginTime = performance.now()
+    mustBufferPageKeysForClInput = true
+    bufferedPageKeys = []
+}
+
+export function keyMuncher(...keys: KeyEventLike[]) {
+    if (keys.length === 0) return
+    if (generatorIsWaiting) {
+        keysToFeed = keysToFeed.concat(keys)
+        generator.next(keysToFeed.shift())
+    } else {
+        keysToFeed = keysToFeed.concat(keys)
+    }
+}
+
 /** Feed keys to the ParserController, unless they should be buffered to be later fed to clInput */
-export function acceptKey(keyevent: KeyboardEvent) {
-    function tryBufferingPageKeyForClInput(keyevent: KeyboardEvent) {
+export function acceptKey(keyevent: TrustedKeyboardEvent) {
+    function tryBufferingPageKeyForClInput(keyevent: TrustedKeyboardEvent) {
         if (!mustBufferPageKeysForClInput) return false
+        if (!commandlineFrameReadyToReceiveMessages) {
+            // Without a ready commandline frame, stop_buffering_page_keys will never
+            // arrive, so we'd buffer (and eat) keys forever. Bail out instead.
+            logger.debug(
+                "controller_content Abandoning buffering for clInput since commandline frame is not yet ready to receive messages",
+                keyevent,
+            )
+            mustBufferPageKeysForClInput = false
+            bufferedPageKeys = []
+            return false
+        }
+        const key = minimalKeyFromKeyboardEvent(keyevent)
+        if (
+            keyevent.type === "keydown" &&
+            (keyevent.key === "Escape" || key.toMapstr() === "<C-[>")
+        ) {
+            mustBufferPageKeysForClInput = false
+            bufferedPageKeys = []
+            return false
+        }
         const bufferingDuration = performance.now() - bufferingPageKeysBeginTime
         logger.debug(
             "controller_content mustBufferPageKeysForClInput = " +
@@ -269,6 +358,7 @@ export function acceptKey(keyevent: KeyboardEvent) {
                 "ms",
         )
         const isCharacterKey =
+            keyevent.type === "keydown" &&
             keyevent.key.length == 1 &&
             !keyevent.metaKey &&
             !keyevent.ctrlKey &&
@@ -281,20 +371,14 @@ export function acceptKey(keyevent: KeyboardEvent) {
         canceller.push(keyevent)
         return true
     }
-    if (!commandlineFrameReadyToReceiveMessages) {
-        // If the commandline frame cannot receive messages, the fillcmdline message sent by excmds.fillcmdline() to the
-        // commandline frame will never be received. As a result, commandline_frame.focus() will not be called, which
-        // in turn means that the stop_buffering_page_keys message will never be sent to the content/page process.
-        // If the content/page process starts buffering keys for clInput, but the stop_buffering_page_keys message is never received,
-        // it will keep buffering (and eating events) forever.
-        logger.debug(
-            "controller_content Ignoring key event ",
-            keyevent,
-            " since commandline frame is not yet ready to receive messages",
-            keyevent,
-        )
-        return
-    }
     if (!tryBufferingPageKeyForClInput(keyevent))
         return generator.next(keyevent)
+}
+
+export function acceptTrustedKey(
+    keyevent: Event,
+    accept: (keyevent: TrustedKeyboardEvent) => unknown = acceptKey,
+) {
+    if (!isTrustedKeyboardEvent(keyevent)) return
+    return accept(keyevent)
 }
