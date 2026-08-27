@@ -35,7 +35,7 @@ function makeKey(
 function makeMatches(count: number): Map<keyseq.MinimalKey[], string> {
     const map: Map<keyseq.MinimalKey[], string> = new Map()
     for (let i = 0; i < count; i++) {
-        map.set([makeKey(String.fromCharCode(97 + (i % 26)))], `cmd${i}`)
+        map.set([makeKey(String.fromCharCode(97 + i))], `cmd${i}`)
     }
     return map
 }
