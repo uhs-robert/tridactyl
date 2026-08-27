@@ -1131,6 +1131,83 @@ export class default_config {
     whichkeyoffset = "8px"
 
     /**
+     * Custom display labels for the which-key overlay.
+     *
+     * Three sub-objects:
+     * - `keys`: mode name → key string → label shown instead of the raw command.
+     * - `excmds`: command name → `{ noargs?, flags? }` for commands that take arguments.
+     * - `headings`: mode name → key prefix → header text shown when that prefix is active.
+     *
+     * Set via `:js`:
+     * ```js
+     * tri.config.set("whichkeydocs", "keys", "normal", "g", "goto")
+     * tri.config.set("whichkeydocs", "excmds", "hint", "noargs", "click element")
+     * tri.config.set("whichkeydocs", "excmds", "hint", "flags", "t", "new tab")
+     * tri.config.set("whichkeydocs", "headings", "normal", "g", "goto bindings")
+     * ```
+     */
+    whichkeydocs: {
+        keys?: Record<string, Record<string, string>>
+        excmds?: Record<
+            string,
+            { noargs?: string; flags?: Record<string, string> }
+        >
+        headings?: Record<string, Record<string, string>>
+    } = {
+        headings: {
+            normal: {
+                ";": "hint",
+                ";g": "hint (rapid)",
+                g: "goto",
+                gx: "close tabs",
+                z: "zoom",
+                y: "yank",
+                "[": "prev",
+                "]": "next",
+            },
+        },
+        excmds: {
+            hint: {
+                noargs: "click element",
+                flags: {
+                    t: "new tab",
+                    b: "background tab",
+                    qb: "rapid background tab",
+                    w: "new window",
+                    wp: "private window",
+                    h: "highlight",
+                    i: "images",
+                    I: "images (new tab)",
+                    k: "kill element",
+                    K: "kill (reversible)",
+                    z: "scroll to",
+                    s: "save",
+                    S: "save image",
+                    a: "save as",
+                    A: "save image as",
+                    ";": "set scroll target",
+                    r: "read (TTS)",
+                    P: "yank alt text",
+                    "#": "yank anchor",
+                    y: "yank link",
+                    p: "yank text",
+                    V: "include invisible",
+                    J: "no JavaScript",
+                    q: "rapid mode",
+                    f: "filter by text",
+                    fr: "filter by regex",
+                    F: "JS callback",
+                    W: "run excmd",
+                    c: "CSS selector only",
+                    C: "CSS selector + default",
+                    x: "exclude selector",
+                    pipe: "pipe attribute",
+                },
+            },
+        },
+    }
+
+    /**
      * @deprecated A list of URLs on which to not load the iframe. Use `seturl [URL] noiframe true` instead, as shown in [[noiframe]].
      */
     noiframeon: string[] = []
