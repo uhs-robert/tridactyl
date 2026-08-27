@@ -40,14 +40,14 @@ function commandAcceptsCount(exstr: string): boolean {
 }
 
 function buildColumn(
-    matches: [string, string][],
+    matches: [string, string, string?][],
     prefixLen: number,
 ): HTMLDivElement {
     const col = document.createElement("div")
     col.className = "wk-column"
-    for (const [keyStr, exstr] of matches) {
+    for (const [keyStr, exstr, displayText] of matches) {
         const row = document.createElement("div")
-        row.className = "wk-row"
+        row.className = exstr ? "wk-row" : "wk-row wk-group"
 
         const keySpan = document.createElement("span")
         keySpan.className = "wk-key"
@@ -67,11 +67,15 @@ function buildColumn(
 
         const exstrEl = document.createElement("a")
         exstrEl.className = "wk-exstr"
-        exstrEl.textContent = exstr
+        exstrEl.textContent = displayText ?? exstr
         const cmdWord = exstr.trim().split(/\s+/)[0]
         if (cmdWord) {
-            const doc = Metadata.getDoc(Metadata.excmdsFunctions[cmdWord])
-            if (doc) exstrEl.title = doc
+            if (displayText) {
+                exstrEl.title = exstr
+            } else {
+                const doc = Metadata.getDoc(Metadata.excmdsFunctions[cmdWord])
+                if (doc) exstrEl.title = doc
+            }
             exstrEl.href =
                 browser.runtime.getURL(
                     "static/docs/modules/_src_excmds_.html",
@@ -89,47 +93,8 @@ function buildColumn(
     return col
 }
 
-/** Render matches split across `columnCount` columns, then report actual height back to content */
-export function update(
-    matches: [string, string][],
-    columnCount: number,
-    generation: number,
-    prefixLen: number,
-    location = "left",
-    prefixStr = "",
-    hasCountPrefix = false,
-) {
-    if (!bindsEl) {
-        logger.error("whichkey_frame: DOM elements not found")
-        return
-    }
-    document.body.dataset.location = location
-
-    if (hasCountPrefix)
-        matches = matches.filter(([, exstr]) => commandAcceptsCount(exstr))
-
-    while (bindsEl.firstChild) bindsEl.removeChild(bindsEl.firstChild)
-
-    let headerEl: HTMLElement | null = null
-    if (prefixStr) {
-        headerEl = document.createElement("div")
-        headerEl.className = "wk-header"
-        headerEl.textContent = prefixStr
-        bindsEl.appendChild(headerEl)
-    }
-
-    const columnsEl = document.createElement("div")
-    columnsEl.className = "wk-columns"
-
-    const cols = Math.max(1, columnCount)
-    const rowsPerCol = Math.ceil(matches.length / cols)
-    for (let i = 0; i < cols; i++) {
-        const slice = matches.slice(i * rowsPerCol, (i + 1) * rowsPerCol)
-        if (slice.length > 0)
-            columnsEl.appendChild(buildColumn(slice, prefixLen))
-    }
-    bindsEl.appendChild(columnsEl)
-
+/** Measure rendered content and report the height/width back to content */
+function measureAndReportSize(generation: number, headerEl: HTMLElement | null) {
     requestAnimationFrame(() => {
         const firstRow = bindsEl.querySelector<HTMLElement>(".wk-row")
         const rowHeightPx = firstRow
@@ -145,6 +110,9 @@ export function update(
             ? (parseFloat(colStyle.paddingTop) || 0) +
               (parseFloat(colStyle.paddingBottom) || 0)
             : 0
+        const rows = bindsEl.querySelectorAll(".wk-row").length
+        const cols = bindsEl.querySelectorAll(".wk-column").length || 1
+        const rowsPerCol = Math.ceil(rows / cols)
         const headerHeightPx = headerEl ? headerEl.offsetHeight : 0
         const naturalHeight = Math.ceil(
             rowsPerCol * rowHeightPx +
@@ -163,6 +131,73 @@ export function update(
             headerMinWidthPx,
         ])
     })
+}
+
+/** Render matches split across `columnCount` columns, then report actual height back to content */
+export function update(
+    matches: [string, string, string?][],
+    columnCount: number,
+    generation: number,
+    prefixLen: number,
+    location = "left",
+    prefixStr = "",
+    hasCountPrefix = false,
+    headingText?: string,
+) {
+    if (!bindsEl) {
+        logger.error("whichkey_frame: DOM elements not found")
+        return
+    }
+    document.body.dataset.location = location
+
+    if (hasCountPrefix)
+        matches = matches.filter(([, exstr]) => commandAcceptsCount(exstr))
+
+    while (bindsEl.firstChild) bindsEl.removeChild(bindsEl.firstChild)
+
+    const headerLabel = headingText ? `+${headingText}` : prefixStr
+    let headerEl: HTMLElement | null = null
+    if (headerLabel) {
+        headerEl = document.createElement("div")
+        headerEl.className = "wk-header"
+        headerEl.textContent = headerLabel
+        bindsEl.appendChild(headerEl)
+    }
+
+    const columnsEl = document.createElement("div")
+    columnsEl.className = "wk-columns"
+
+    const cols = Math.max(1, columnCount)
+    const rowsPerCol = Math.ceil(matches.length / cols)
+    for (let i = 0; i < cols; i++) {
+        const slice = matches.slice(i * rowsPerCol, (i + 1) * rowsPerCol)
+        if (slice.length > 0)
+            columnsEl.appendChild(buildColumn(slice, prefixLen))
+    }
+    bindsEl.appendChild(columnsEl)
+
+    measureAndReportSize(generation, headerEl)
+}
+
+/** Handle header-only changes, skip rebuild and update header directly */
+export function updateHeader(headerLabel: string, generation: number) {
+    if (!bindsEl) {
+        logger.error("whichkey_frame: DOM elements not found")
+        return
+    }
+    let headerEl = bindsEl.querySelector<HTMLElement>(".wk-header")
+    if (headerLabel) {
+        if (!headerEl) {
+            headerEl = document.createElement("div")
+            headerEl.className = "wk-header"
+            bindsEl.insertBefore(headerEl, bindsEl.firstChild)
+        }
+        headerEl.textContent = headerLabel
+    } else if (headerEl) {
+        headerEl.remove()
+        headerEl = null
+    }
+    measureAndReportSize(generation, headerEl)
 }
 
 Messaging.addListener("whichkey_frame", Messaging.attributeCaller(SELF))

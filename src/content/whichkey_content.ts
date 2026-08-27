@@ -5,6 +5,7 @@ import type { MinimalKey } from "@src/lib/keyseq"
 import { splitNumericPrefix } from "@src/lib/keyseq"
 import * as Messaging from "@src/lib/messaging"
 import { mode2maps } from "@src/lib/binding"
+import * as Metadata from "@src/.metadata.generated"
 
 const logger = new Logger("whichkey")
 
@@ -15,6 +16,8 @@ let lastShownPrefixStr: string | null = null
 let lastMultiColumn = false // Tracks whether last show() was multi-column for resize() to restore position
 let lastShownMode: string | null = null
 let lastShownPrefix: MinimalKey[] = []
+let lastRenderedMode: string | null = null
+let lastRenderedPressedPrefix: string | null = null
 
 function makeIframe() {
     wk_iframe = window.document.createElementNS(
@@ -85,13 +88,97 @@ function columnsFor(rowCount: number): number {
     return Math.min(columnCount, maxColumns)
 }
 
+const TOKEN_RE = /^(<[^>]+>|.)(.*)/s
+
+function nextTokenOf(keyStr: string, skipN: number): string {
+    let s = keyStr
+    for (let i = 0; i < skipN; i++) {
+        const m = TOKEN_RE.exec(s)
+        if (!m) return ""
+        s = m[2]
+    }
+    const m = TOKEN_RE.exec(s)
+    return m ? m[1] : ""
+}
+
+function resolveDisplayText(
+    _mode: string,
+    _keyStr: string,
+    exstr: string,
+): string | undefined {
+    const parts = exstr.trim().split(/\s+/)
+    const cmdWord = parts[0]
+    const flagArgs = parts.slice(1).filter((p: string) => p.startsWith("-"))
+    // Check metadata @arg flags: try combined string first, then right-to-left chars
+    const metaFlags = Metadata.excmdsFunctions[cmdWord]?.flags as
+        | Record<string, string>
+        | undefined
+    if (metaFlags && flagArgs.length > 0) {
+        // For -W/-F/-pipe, append the next positional arg to give context
+        const wIdx = parts.indexOf("-W")
+        if (wIdx !== -1 && parts[wIdx + 1]) return `run: ${parts[wIdx + 1]}`
+        const combined = flagArgs.map((f: string) => f.slice(1)).join("")
+        if (metaFlags[`-${combined}`] !== undefined) return metaFlags[`-${combined}`]
+        for (let i = combined.length - 1; i >= 0; i--) {
+            const label = metaFlags[`-${combined[i]}`]
+            if (label !== undefined) return label
+        }
+    }
+    return undefined
+}
+
 export function show(mode: string, prefix: MinimalKey[]) {
     if (config.get("whichkeyenabled") === "false") return
     if (!mode2maps.has(mode)) return
 
-    const [countKeys, cmdKeys] =
+    const [countKeys, rawCmdKeys] =
         prefix.length > 0 ? splitNumericPrefix(prefix) : [[], prefix]
     const countStr = countKeys.map(k => k.key).join("")
+    const cmdKeys = rawCmdKeys.filter(k => !k.keyup)
+    const pressedPrefix = cmdKeys.map(k => k.toMapstr()).join("")
+
+    // Header prefix: each key token separated by » (e.g. "12 » g").
+    const prefixTokens = [
+        ...(countStr ? [countStr] : []),
+        ...cmdKeys.map(k => k.toMapstr()),
+    ].filter(Boolean)
+    const prefixStr = prefixTokens.join(" » ")
+
+    // Modifier keydowns (e.g. Control before Escape) cause redundant show() calls with the same prefix, skip to avoid reset/resize cycle.
+    if (
+        wk_iframe &&
+        !wk_iframe.classList.contains("hidden") &&
+        prefixStr === lastShownPrefixStr
+    )
+        return
+
+    // Handle count digits changes, update header only
+    if (
+        wk_iframe &&
+        !wk_iframe.classList.contains("hidden") &&
+        mode === lastRenderedMode &&
+        pressedPrefix === lastRenderedPressedPrefix
+    ) {
+        const docs = config.get("whichkeydocs") ?? {}
+        const headingText: string | undefined =
+            pressedPrefix ? docs.headings?.[mode]?.[pressedPrefix] : undefined
+        const headerLabel = headingText ? `+${headingText}` : prefixStr
+
+        const delay = parseInt(config.get("whichkeydelay") as string, 10) || 0
+        if (showTimer !== null) clearTimeout(showTimer)
+        const doUpdateHeader = () => {
+            showTimer = null
+            lastShownPrefixStr = prefixStr
+            lastShownPrefix = prefix
+            Messaging.messageOwnTab("whichkey_frame", "updateHeader", [
+                headerLabel,
+                showGeneration,
+            ])
+        }
+        if (delay > 0) showTimer = setTimeout(doUpdateHeader, delay)
+        else doUpdateHeader()
+        return
+    }
 
     let matches: [string, string][]
     try {
@@ -99,12 +186,13 @@ export function show(mode: string, prefix: MinimalKey[]) {
         if (conf === undefined) return
         const map = keyseq.keyMap(conf)
 
-        // Use only the non-count part of the prefix for completions.
+        // show only bare key prefix pressed so far to find what can come next.
         matches = [...keyseq.completions(cmdKeys, map).entries()]
             .map(
                 ([ks, exstr]) =>
                     [
-                        ks.map(k => k.toMapstr()).join(""),
+                        // Drop the optional release placeholders
+                        ks.filter(k => !k.optional).map(k => k.toMapstr()).join(""),
                         typeof exstr === "string" ? exstr : String(exstr),
                     ] as [string, string],
             )
@@ -124,38 +212,56 @@ export function show(mode: string, prefix: MinimalKey[]) {
         return
     }
 
-    // Header prefix: each key token separated by » (e.g. "12 » g").
-    const prefixTokens = [
-        ...(countStr ? [countStr] : []),
-        ...cmdKeys.map(k => k.toMapstr()),
-    ].filter(Boolean)
-    const prefixStr = prefixTokens.join(" » ")
+    const docs = config.get("whichkeydocs") ?? {}
+    const depth = cmdKeys.length
 
-    // Modifier keydowns (e.g. Control before Escape) cause redundant show() calls with the same prefix, skip to avoid reset/resize cycle.
-    if (
-        wk_iframe &&
-        !wk_iframe.classList.contains("hidden") &&
-        prefixStr === lastShownPrefixStr
-    )
-        return
+    // Group completions by their next token to detect and collapse sub-prefixes.
+    const byNextToken = new Map<string, [string, string][]>()
+    for (const match of matches) {
+        const tok = nextTokenOf(match[0], depth)
+        let group = byNextToken.get(tok)
+        if (!group) {
+            group = []
+            byNextToken.set(tok, group)
+        }
+        group.push(match)
+    }
+
+    const resolvedMatches: [string, string, string?][] = []
+    for (const [tok, group] of byNextToken) {
+        if (group.length === 1) {
+            const [ks, exstr] = group[0]
+            resolvedMatches.push([ks, exstr, resolveDisplayText(mode, ks, exstr)])
+        } else {
+            // Multiple completions share this next token, collapse into one row.
+            const subKey = pressedPrefix + tok
+            const heading = docs.headings?.[mode]?.[subKey]
+            resolvedMatches.push([subKey, "", heading ? `+${heading}` : `+[${group.length}]`])
+        }
+    }
+
+    const headingText: string | undefined =
+        pressedPrefix ? docs.headings?.[mode]?.[pressedPrefix] : undefined
 
     const delay = parseInt(config.get("whichkeydelay") as string, 10) || 0
     if (showTimer !== null) clearTimeout(showTimer)
 
     const doShow = () => {
         showTimer = null
-        const columnCount = columnsFor(matches.length)
+        const columnCount = columnsFor(resolvedMatches.length)
         lastMultiColumn = columnCount > 1
         const gen = ++showGeneration
         lastShownPrefixStr = prefixStr
         lastShownMode = mode
         lastShownPrefix = prefix
+        lastRenderedMode = mode
+        lastRenderedPressedPrefix = pressedPrefix
 
         const loc = applyPosition(lastMultiColumn)
         ensureIframeExists()
         wk_iframe.classList.remove("hidden")
         wk_iframe.style.setProperty("opacity", "0", "important") // Keep invisible until resize()
-        const rowsInTallestCol = Math.ceil(matches.length / columnCount)
+        const rowsInTallestCol = Math.ceil(resolvedMatches.length / columnCount)
         const estimatedHeight = Math.min(
             rowsInTallestCol * APPROX_ROW_HEIGHT_PX +
                 (prefixStr ? APPROX_HEADER_HEIGHT_PX : 0),
@@ -167,13 +273,14 @@ export function show(mode: string, prefix: MinimalKey[]) {
             "important",
         )
         Messaging.messageOwnTab("whichkey_frame", "update", [
-            matches,
+            resolvedMatches,
             columnCount,
             gen,
             cmdKeys.length,
             loc,
             prefixStr,
             countKeys.length > 0,
+            headingText,
         ])
     }
 

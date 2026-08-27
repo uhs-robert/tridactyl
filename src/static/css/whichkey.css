@@ -12,6 +12,7 @@
     --tridactyl-wk-key-fg: var(--tridactyl-cmplt-fg, black);
     --tridactyl-wk-key-next-fg: #ffa500;
     --tridactyl-wk-exstr-fg: var(--tridactyl-url-fg, #1f9947);
+    --tridactyl-wk-group-fg: #5b6af0;
     --tridactyl-wk-border: var(--tridactyl-cmplt-border-top, 1px solid #ccc);
     --tridactyl-wk-outer-border: var(
         --tridactyl-cmplt-border-top,
@@ -31,6 +32,7 @@
         --tridactyl-wk-key-fg: var(--tridactyl-cmplt-fg, #e0e0e0);
         --tridactyl-wk-key-next-fg: #ffb347;
         --tridactyl-wk-exstr-fg: var(--tridactyl-url-fg, #5faf5f);
+        --tridactyl-wk-group-fg: #7b8ff5;
         --tridactyl-wk-border: var(
             --tridactyl-cmplt-border-top,
             1px solid #555
@@ -172,4 +174,11 @@ body[data-location="center"] #whichkey-binds {
 
 .wk-exstr:hover {
     text-decoration: underline;
+}
+
+.wk-group .wk-exstr,
+.wk-group .wk-exstr:link,
+.wk-group .wk-exstr:visited {
+    color: var(--tridactyl-wk-group-fg, #5b6af0) !important;
+    cursor: default;
 }
