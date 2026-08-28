@@ -6,11 +6,11 @@ jest.mock("@src/lib/messaging", () => ({
     attributeCaller: jest.fn().mockReturnValue({}),
 }))
 
-jest.mock("@src/lib/logging", () => {
-    return jest
-        .fn()
-        .mockImplementation(() => ({ debug: jest.fn(), error: jest.fn() }))
-})
+// whichkey_frame.ts calls theme() at module scope on import (`theme(document.querySelector(":root"))`),
+// and theme() needs real browser tab APIs (ownTabId/browserBg) we don't have here.
+jest.mock("@src/content/styling", () => ({
+    theme: jest.fn().mockResolvedValue(undefined),
+}))
 
 const mockMessaging = Messaging as jest.Mocked<typeof Messaging>
 
