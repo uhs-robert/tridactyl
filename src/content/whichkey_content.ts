@@ -109,19 +109,19 @@ function resolveDisplayText(
     const parts = exstr.trim().split(/\s+/)
     const cmdWord = parts[0]
     const flagArgs = parts.slice(1).filter((p: string) => p.startsWith("-"))
-    // Check metadata @arg flags: try combined string first, then right-to-left chars
+    // Check metadata @flag tags: try combined string first, then right-to-left chars
     const metaFlags = Metadata.excmdsFunctions[cmdWord]?.flags as
-        | Record<string, string>
+        | Record<string, { short: string; description: string }>
         | undefined
     if (metaFlags && flagArgs.length > 0) {
         // For -W/-F/-pipe, append the next positional arg to give context
         const wIdx = parts.indexOf("-W")
         if (wIdx !== -1 && parts[wIdx + 1]) return `run: ${parts[wIdx + 1]}`
         const combined = flagArgs.map((f: string) => f.slice(1)).join("")
-        if (metaFlags[`-${combined}`] !== undefined) return metaFlags[`-${combined}`]
+        if (metaFlags[`-${combined}`] !== undefined) return metaFlags[`-${combined}`].short
         for (let i = combined.length - 1; i >= 0; i--) {
             const label = metaFlags[`-${combined[i]}`]
-            if (label !== undefined) return label
+            if (label !== undefined) return label.short
         }
     }
     return undefined
